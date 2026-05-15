@@ -12,6 +12,7 @@
             --bg-color: #f8fafc;
             --border: #e2e8f0;
             --draw: #f59e0b;
+            --undo: #64748b;
         }
         body {
             font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
@@ -33,7 +34,6 @@
             border-radius: 8px;
             box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
         }
-        /* 動画とCanvasを重ねるためのコンテナ */
         .video-container {
             position: relative;
             width: 100%;
@@ -41,14 +41,12 @@
             background: #000;
             border-radius: 4px;
             overflow: hidden;
-            /* 動画の縦横比を維持するための仮設定 */
             min-height: 300px; 
         }
         video {
             width: 100%;
             display: block;
         }
-        /* 線を引くためのキャンバス。初期状態ではクリックを無効化（動画操作を優先） */
         canvas {
             position: absolute;
             top: 0;
@@ -58,12 +56,10 @@
             pointer-events: none; 
             z-index: 10;
         }
-        /* 描画モードONのときはキャンバスへのクリックを有効化 */
         canvas.drawing-active {
             pointer-events: auto;
             cursor: crosshair;
         }
-
         h2 { font-size: 1.2rem; margin-top: 0; border-bottom: 2px solid var(--border); padding-bottom: 8px; }
         
         .btn-group { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
@@ -86,14 +82,18 @@
         button.draw-btn { background-color: var(--draw); }
         button.draw-btn:hover { background-color: #d97706; }
         button.draw-btn.active { background-color: #b45309; box-shadow: inset 0 3px 5px rgba(0,0,0,0.2); }
+        button.undo-btn { background-color: var(--undo); font-size: 0.9rem; padding: 10px 12px; }
+        button.undo-btn:hover { background-color: #475569; }
         button.export-btn { background-color: var(--secondary); width: 100%; margin-top: 10px; }
         
         table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
         th, td { padding: 8px; text-align: left; border-bottom: 1px solid var(--border); }
         th { background-color: #f1f5f9; font-size: 0.9rem; }
         td { font-family: monospace; font-size: 1.1rem; }
+        .unmeasured { color: #94a3b8; font-style: italic; font-size: 0.9rem; }
         .time-display { font-weight: bold; font-size: 1.1rem; color: var(--primary); margin-bottom: 16px; }
         .help-text { font-size: 0.85rem; color: #64748b; margin-top: -10px; margin-bottom: 16px; display: block; }
+        .detected-distance { color: #10b981; font-weight: bold; margin-left: 10px; font-size: 1rem; }
 
         @media (max-width: 900px) {
             .container { grid-template-columns: 1fr; }
@@ -103,8 +103,9 @@
 <body>
 
 <div class="container">
+    <!-- 左側：映像・コントロールエリア -->
     <div class="video-section">
-        <h2>1. 映像読み込み・再生</h2>
+        <h2>1. 映像読み込み・再生 <span id="detected-distance" class="detected-distance"></span></h2>
         <input type="file" id="video-upload" accept="video/*" style="margin-bottom: 15px;">
         
         <div class="video-container" id="video-container">
@@ -124,34 +125,37 @@
         </div>
         <span class="help-text">描画モードONの時、画面をドラッグして直線を引けます（複数可）。</span>
         
-        <h2>3. タイム計測</h2>
+        <h2>3. タイム計測 (到達時間)</h2>
         <div class="btn-group">
             <button class="action-btn" id="btn-start">Start (開始時間)</button>
             <button id="btn-split">Split (通過)</button>
+            <button class="undo-btn" id="btn-undo-split">↩ 1つ取り消す</button>
         </div>
         
         <h2>4. ストロークテンポ計測</h2>
         <div class="btn-group">
             <button class="tempo-btn" id="btn-tempo-0">テンポ「0」</button>
             <button class="tempo-btn" id="btn-tempo-3">テンポ「3」</button>
+            <button class="undo-btn" id="btn-undo-tempo">↩ 1つ取り消す</button>
         </div>
     </div>
 
+    <!-- 右側：データ出力エリア -->
     <div class="controls-section">
         <h2>計測データ</h2>
         <div class="time-display">
             基準開始時間: <span id="base-start-time">未設定</span>
         </div>
 
-        <h3>スプリットタイム (到達時間)</h3>
+        <h3>スプリットタイム</h3>
         <table id="split-table">
-            <thead><tr><th>区間</th><th>タイム (秒)</th></tr></thead>
+            <thead><tr><th>分析区間</th><th>タイム (秒)</th></tr></thead>
             <tbody></tbody>
         </table>
 
-        <h3>ストロークテンポ (秒/回)</h3>
+        <h3>ストロークテンポ</h3>
         <table id="tempo-table">
-            <thead><tr><th>計測回</th><th>テンポ (秒)</th></tr></thead>
+            <thead><tr><th>分析区間</th><th>テンポ (秒/回)</th></tr></thead>
             <tbody></tbody>
         </table>
 
@@ -164,20 +168,76 @@
     const video = document.getElementById('video-player');
     const currentTimeDisplay = document.getElementById('current-time-display');
     const baseStartTimeDisplay = document.getElementById('base-start-time');
+    const detectedDistanceDisplay = document.getElementById('detected-distance');
     const splitTableBody = document.querySelector('#split-table tbody');
     const tempoTableBody = document.querySelector('#tempo-table tbody');
+
+    // --- 各距離の目標区間定義 ---
+    const distanceDefinitions = {
+        '50m': {
+            splits: ['15m', '25m', '35m', '45m'],
+            tempos: ['Lap 1']
+        },
+        '100m': {
+            splits: ['15m', '25m', '35m', '45m', '50m', '65m', '75m', '85m', '95m', '100m'],
+            tempos: ['Lap 1', 'Lap 2']
+        },
+        '200m': {
+            splits: ['15m', '25m', '45m', '50m', '65m', '75m', '95m', '100m', '115m', '125m', '145m', '150m', '165m', '175m', '195m', '200m'],
+            tempos: ['Lap 1', 'Lap 2', 'Lap 3', 'Lap 4']
+        },
+        '400m': {
+            splits: ['15m', '45m', '50m', '65m', '95m', '100m', '115m', '145m', '150m', '165m', '195m', '200m', '215m', '245m', '250m', '265m', '295m', '300m', '315m', '345m', '350m', '365m', '395m', '400m'],
+            tempos: ['Lap 1', 'Lap 2', 'Lap 3', 'Lap 4', 'Lap 5', 'Lap 6', 'Lap 7', 'Lap 8']
+        }
+    };
 
     // --- 計測用変数 ---
     let startTime = null;
     let tempoZeroTime = null;
-    let splits = [];
-    let tempos = [];
+    let recordedSplits = [];
+    let recordedTempos = [];
+    let targetSplits = [];
+    let targetTempos = [];
 
-    // --- 動画読み込み ---
+    // 初期状態のテーブル描画
+    updateSplitTable();
+    updateTempoTable();
+
+    // --- 動画読み込みとファイル名解析 ---
     document.getElementById('video-upload').addEventListener('change', function(e) {
         const file = e.target.files[0];
         if (file) {
             video.src = URL.createObjectURL(file);
+            
+            // ファイル名から距離を判定
+            const fileName = file.name.toLowerCase();
+            let detected = null;
+            
+            if (fileName.includes('400m')) detected = '400m';
+            else if (fileName.includes('200m')) detected = '200m';
+            else if (fileName.includes('100m')) detected = '100m';
+            else if (fileName.includes('50m')) detected = '50m';
+
+            // 判別結果を適用
+            if (detected) {
+                detectedDistanceDisplay.textContent = `(${detected}の分析区間を適用中)`;
+                targetSplits = distanceDefinitions[detected].splits;
+                targetTempos = distanceDefinitions[detected].tempos;
+            } else {
+                detectedDistanceDisplay.textContent = '(距離を自動判別できませんでした)';
+                targetSplits = [];
+                targetTempos = [];
+            }
+            
+            // データのリセットとテーブルの再描画
+            startTime = null;
+            tempoZeroTime = null;
+            recordedSplits = [];
+            recordedTempos = [];
+            baseStartTimeDisplay.textContent = '未設定';
+            updateSplitTable();
+            updateTempoTable();
         }
     });
 
@@ -202,45 +262,95 @@
     document.getElementById('btn-start').addEventListener('click', () => {
         startTime = video.currentTime;
         baseStartTimeDisplay.textContent = startTime.toFixed(2) + ' 秒';
-        splits = []; updateSplitTable();
-    });
-
-    document.getElementById('btn-split').addEventListener('click', () => {
-        if (startTime === null) { alert('先にStartを押してください。'); return; }
-        splits.push((video.currentTime - startTime).toFixed(2));
+        recordedSplits = []; 
         updateSplitTable();
     });
 
+    // スプリット計測
+    document.getElementById('btn-split').addEventListener('click', () => {
+        if (startTime === null) { alert('先にStartを押して開始時間を設定してください。'); return; }
+        recordedSplits.push((video.currentTime - startTime).toFixed(2));
+        updateSplitTable();
+    });
+
+    // スプリット取り消し (Undo)
+    document.getElementById('btn-undo-split').addEventListener('click', () => {
+        if (recordedSplits.length > 0) {
+            recordedSplits.pop();
+            updateSplitTable();
+        }
+    });
+
+    // テンポ「0」
     document.getElementById('btn-tempo-0').addEventListener('click', () => {
         tempoZeroTime = video.currentTime;
     });
 
+    // テンポ「3」
     document.getElementById('btn-tempo-3').addEventListener('click', () => {
         if (tempoZeroTime === null) { alert('先にテンポ「0」を押してください。'); return; }
-        tempos.push(((video.currentTime - tempoZeroTime) / 3).toFixed(2));
+        recordedTempos.push(((video.currentTime - tempoZeroTime) / 3).toFixed(2));
         updateTempoTable();
         tempoZeroTime = null;
     });
 
+    // テンポ取り消し (Undo)
+    document.getElementById('btn-undo-tempo').addEventListener('click', () => {
+        if (recordedTempos.length > 0) {
+            recordedTempos.pop();
+            updateTempoTable();
+            tempoZeroTime = null; // リカバリーのために0の記録も一旦クリア
+        }
+    });
+
+    // --- テーブル描画ロジック ---
     function updateSplitTable() {
         splitTableBody.innerHTML = '';
-        splits.forEach((time, index) => {
-            splitTableBody.innerHTML += `<tr><td>Split ${index + 1}</td><td>${time}</td></tr>`;
-        });
+        // 目標区間の数、または実際に計測した数のうち、多い方に合わせて行を生成
+        const rowCount = Math.max(targetSplits.length, recordedSplits.length);
+        
+        if (rowCount === 0) {
+            splitTableBody.innerHTML = '<tr><td colspan="2" class="unmeasured">動画を読み込むか、計測を開始してください</td></tr>';
+            return;
+        }
+
+        for (let i = 0; i < rowCount; i++) {
+            const label = targetSplits[i] || `追加区間 ${i + 1}`;
+            const time = recordedSplits[i] !== undefined ? recordedSplits[i] : '<span class="unmeasured">未計測</span>';
+            splitTableBody.innerHTML += `<tr><td>${label}</td><td>${time}</td></tr>`;
+        }
     }
 
     function updateTempoTable() {
         tempoTableBody.innerHTML = '';
-        tempos.forEach((time, index) => {
-            tempoTableBody.innerHTML += `<tr><td>計測 ${index + 1}</td><td>${time}</td></tr>`;
-        });
+        const rowCount = Math.max(targetTempos.length, recordedTempos.length);
+        
+        if (rowCount === 0) {
+            tempoTableBody.innerHTML = '<tr><td colspan="2" class="unmeasured">動画を読み込むか、計測を開始してください</td></tr>';
+            return;
+        }
+
+        for (let i = 0; i < rowCount; i++) {
+            const label = targetTempos[i] || `追加計測 ${i + 1}`;
+            const time = recordedTempos[i] !== undefined ? recordedTempos[i] : '<span class="unmeasured">未計測</span>';
+            tempoTableBody.innerHTML += `<tr><td>${label}</td><td>${time}</td></tr>`;
+        }
     }
 
     // --- CSVエクスポート ---
     document.getElementById('btn-export').addEventListener('click', () => {
-        let csvContent = "データ種別,番号,タイム(秒)\n";
-        splits.forEach((time, index) => { csvContent += `Split,${index + 1},${time}\n`; });
-        tempos.forEach((time, index) => { csvContent += `Tempo,${index + 1},${time}\n`; });
+        let csvContent = "データ種別,分析区間,タイム(秒)\n";
+        
+        for (let i = 0; i < recordedSplits.length; i++) {
+            const label = targetSplits[i] || `追加区間${i + 1}`;
+            csvContent += `Split,${label},${recordedSplits[i]}\n`;
+        }
+        
+        for (let i = 0; i < recordedTempos.length; i++) {
+            const label = targetTempos[i] || `追加計測${i + 1}`;
+            csvContent += `Tempo,${label},${recordedTempos[i]}\n`;
+        }
+
         const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvContent], { type: "text/csv;charset=utf-8;" });
         const link = document.createElement("a");
         link.href = URL.createObjectURL(blob);
@@ -258,58 +368,46 @@
 
     let isDrawMode = false;
     let isDrawing = false;
-    let lines = []; // 引いた直線を保存する配列
-    let currentLine = null; // 現在ドラッグ中の線
+    let lines = [];
+    let currentLine = null;
 
-    // キャンバスのサイズをビデオの表示サイズに合わせる
     function resizeCanvas() {
         canvas.width = canvas.offsetWidth;
         canvas.height = canvas.offsetHeight;
         redrawCanvas();
     }
-    // ビデオのメタデータ読み込み時とウィンドウリサイズ時にキャンバスサイズを調整
     video.addEventListener('loadedmetadata', resizeCanvas);
     window.addEventListener('resize', resizeCanvas);
 
-    // 描画モードの切り替え
     btnDrawToggle.addEventListener('click', () => {
         isDrawMode = !isDrawMode;
         if (isDrawMode) {
             btnDrawToggle.textContent = '描画モード：ON';
             btnDrawToggle.classList.add('active');
-            canvas.classList.add('drawing-active'); // クリックを検知できるようにする
+            canvas.classList.add('drawing-active');
         } else {
             btnDrawToggle.textContent = '描画モード：OFF';
             btnDrawToggle.classList.remove('active');
-            canvas.classList.remove('drawing-active'); // 動画の操作(再生/停止など)を優先する
+            canvas.classList.remove('drawing-active');
         }
     });
 
-    // 全消去ボタン
     btnClearLines.addEventListener('click', () => {
         lines = [];
         redrawCanvas();
     });
 
-    // マウスの現在座標を取得する関数
     function getMousePos(e) {
         const rect = canvas.getBoundingClientRect();
-        return {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top
-        };
+        return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     }
 
-    // キャンバスを再描画する関数（保存された線＋現在引いている線）
     function redrawCanvas() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        
-        // 線のスタイル設定（蛍光イエローで少し太め）
-        ctx.strokeStyle = '#eab308'; // Tailwindのyellow-500
+        ctx.strokeStyle = '#eab308';
         ctx.lineWidth = 3;
         ctx.lineCap = 'round';
 
-        // 保存された線を描画
         lines.forEach(line => {
             ctx.beginPath();
             ctx.moveTo(line.startX, line.startY);
@@ -317,7 +415,6 @@
             ctx.stroke();
         });
 
-        // 現在ドラッグ中の線を描画
         if (currentLine) {
             ctx.beginPath();
             ctx.moveTo(currentLine.startX, currentLine.startY);
@@ -326,7 +423,6 @@
         }
     }
 
-    // マウス操作のイベントリスナー
     canvas.addEventListener('mousedown', (e) => {
         if (!isDrawMode) return;
         isDrawing = true;
@@ -346,7 +442,6 @@
         if (!isDrawing) return;
         isDrawing = false;
         if (currentLine) {
-            // 少しでもドラッグされていれば線として保存
             if (currentLine.startX !== currentLine.endX || currentLine.startY !== currentLine.endY) {
                 lines.push(currentLine);
             }
@@ -355,7 +450,6 @@
         redrawCanvas();
     });
 
-    // キャンバスからマウスが外れた時も描画を終了する
     canvas.addEventListener('mouseleave', () => {
         if (isDrawing) {
             isDrawing = false;
