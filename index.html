@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>競泳レース分析ツール</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --secondary: #475569;
+            --bg-color: #f8fafc;
+            --border: #e2e8f0;
+            --draw: #f59e0b;
+        }
+        body {
+            font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
+            background-color: var(--bg-color);
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 24px;
+        }
+        .video-section, .controls-section {
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+        /* 動画とCanvasを重ねるためのコンテナ */
+        .video-container {
+            position: relative;
+            width: 100%;
+            margin-bottom: 10px;
+            background: #000;
+            border-radius: 4px;
+            overflow: hidden;
+            /* 動画の縦横比を維持するための仮設定 */
+            min-height: 300px; 
+        }
+        video {
+            width: 100%;
+            display: block;
+        }
+        /* 線を引くためのキャンバス。初期状態ではクリックを無効化（動画操作を優先） */
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; 
+            z-index: 10;
+        }
+        /* 描画モードONのときはキャンバスへのクリックを有効化 */
+        canvas.drawing-active {
+            pointer-events: auto;
+            cursor: crosshair;
+        }
+
+        h2 { font-size: 1.2rem; margin-top: 0; border-bottom: 2px solid var(--border); padding-bottom: 8px; }
+        
+        .btn-group { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+        button {
+            padding: 10px 16px;
+            font-size: 1rem;
+            font-weight: bold;
+            color: #fff;
+            background-color: var(--primary);
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: var(--primary-hover); }
+        button.action-btn { background-color: #ef4444; }
+        button.action-btn:hover { background-color: #dc2626; }
+        button.tempo-btn { background-color: #10b981; }
+        button.tempo-btn:hover { background-color: #059669; }
+        button.draw-btn { background-color: var(--draw); }
+        button.draw-btn:hover { background-color: #d97706; }
+        button.draw-btn.active { background-color: #b45309; box-shadow: inset 0 3px 5px rgba(0,0,0,0.2); }
+        button.export-btn { background-color: var(--secondary); width: 100%; margin-top: 10px; }
+        
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid var(--border); }
+        th { background-color: #f1f5f9; font-size: 0.9rem; }
+        td { font-family: monospace; font-size: 1.1rem; }
+        .time-display { font-weight: bold; font-size: 1.1rem; color: var(--primary); margin-bottom: 16px; }
+        .help-text { font-size: 0.85rem; color: #64748b; margin-top: -10px; margin-bottom: 16px; display: block; }
+
+        @media (max-width: 900px) {
+            .container { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="video-section">
+        <h2>1. 映像読み込み・再生</h2>
+        <input type="file" id="video-upload" accept="video/*" style="margin-bottom: 15px;">
+        
+        <div class="video-container" id="video-container">
+            <video id="video-player" controls></video>
+            <canvas id="draw-canvas"></canvas>
+        </div>
+        <span class="help-text">※キーボードの「←」「→」でコマ送り・コマ戻しができます。</span>
+
+        <div class="time-display">
+            動画の現在時間: <span id="current-time-display">0.00</span> 秒
+        </div>
+
+        <h2>2. キャリブレーション (直線描画)</h2>
+        <div class="btn-group">
+            <button class="draw-btn" id="btn-draw-toggle">描画モード：OFF</button>
+            <button class="export-btn" id="btn-clear-lines" style="width: auto; margin-top: 0;">線をすべて消去</button>
+        </div>
+        <span class="help-text">描画モードONの時、画面をドラッグして直線を引けます（複数可）。</span>
+        
+        <h2>3. タイム計測</h2>
+        <div class="btn-group">
+            <button class="action-btn" id="btn-start">Start (開始時間)</button>
+            <button id="btn-split">Split (通過)</button>
+        </div>
+        
+        <h2>4. ストロークテンポ計測</h2>
+        <div class="btn-group">
+            <button class="tempo-btn" id="btn-tempo-0">テンポ「0」</button>
+            <button class="tempo-btn" id="btn-tempo-3">テンポ「3」</button>
+        </div>
+    </div>
+
+    <div class="controls-section">
+        <h2>計測データ</h2>
+        <div class="time-display">
+            基準開始時間: <span id="base-start-time">未設定</span>
+        </div>
+
+        <h3>スプリットタイム (到達時間)</h3>
+        <table id="split-table">
+            <thead><tr><th>区間</th><th>タイム (秒)</th></tr></thead>
+            <tbody></tbody>
+        </table>
+
+        <h3>ストロークテンポ (秒/回)</h3>
+        <table id="tempo-table">
+            <thead><tr><th>計測回</th><th>テンポ (秒)</th></tr></thead>
+            <tbody></tbody>
+        </table>
+
+        <button class="export-btn" id="btn-export">CSVダウンロード</button>
+    </div>
+</div>
+
+<script>
+    // --- 要素の取得 ---
+    const video = document.getElementById('video-player');
+    const currentTimeDisplay = document.getElementById('current-time-display');
+    const baseStartTimeDisplay = document.getElementById('base-start-time');
+    const splitTableBody = document.querySelector('#split-table tbody');
+    const tempoTableBody = document.querySelector('#tempo-table tbody');
+
+    // --- 計測用変数 ---
+    let startTime = null;
+    let tempoZeroTime = null;
+    let splits = [];
+    let tempos = [];
+
+    // --- 動画読み込み ---
+    document.getElementById('video-upload').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            video.src = URL.createObjectURL(file);
+        }
+    });
+
+    video.addEventListener('timeupdate', () => {
+        currentTimeDisplay.textContent = video.currentTime.toFixed(2);
+    });
+
+    // --- コマ送り機能 ---
+    document.addEventListener('keydown', function(event) {
+        if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+        const frameTime = 1 / 30; // 30fps想定
+        if (event.key === 'ArrowRight') {
+            video.currentTime += frameTime;
+            event.preventDefault();
+        } else if (event.key === 'ArrowLeft') {
+            video.currentTime -= frameTime;
+            event.preventDefault();
+        }
+    });
+
+    // --- 計測ロジック ---
+    document.getElementById('btn-start').addEventListener('click', () => {
+        startTime = video.currentTime;
+        baseStartTimeDisplay.textContent = startTime.toFixed(2) + ' 秒';
+        splits = []; updateSplitTable();
+    });
+
+    document.getElementById('btn-split').addEventListener('click', () => {
+        if (startTime === null) { alert('先にStartを押してください。'); return; }
+        splits.push((video.currentTime - startTime).toFixed(2));
+        updateSplitTable();
+    });
+
+    document.getElementById('btn-tempo-0').addEventListener('click', () => {
+        tempoZeroTime = video.currentTime;
+    });
+
+    document.getElementById('btn-tempo-3').addEventListener('click', () => {
+        if (tempoZeroTime === null) { alert('先にテンポ「0」を押してください。'); return; }
+        tempos.push(((video.currentTime - tempoZeroTime) / 3).toFixed(2));
+        updateTempoTable();
+        tempoZeroTime = null;
+    });
+
+    function updateSplitTable() {
+        splitTableBody.innerHTML = '';
+        splits.forEach((time, index) => {
+            splitTableBody.innerHTML += `<tr><td>Split ${index + 1}</td><td>${time}</td></tr>`;
+        });
+    }
+
+    function updateTempoTable() {
+        tempoTableBody.innerHTML = '';
+        tempos.forEach((time, index) => {
+            tempoTableBody.innerHTML += `<tr><td>計測 ${index + 1}</td><td>${time}</td></tr>`;
+        });
+    }
+
+    // --- CSVエクスポート ---
+    document.getElementById('btn-export').addEventListener('click', () => {
+        let csvContent = "データ種別,番号,タイム(秒)\n";
+        splits.forEach((time, index) => { csvContent += `Split,${index + 1},${time}\n`; });
+        tempos.forEach((time, index) => { csvContent += `Tempo,${index + 1},${time}\n`; });
+        const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvContent], { type: "text/csv;charset=utf-8;" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "race_analysis.csv";
+        link.click();
+    });
+
+    // ==========================================
+    // --- キャリブレーション (描画) 機能 ---
+    // ==========================================
+    const canvas = document.getElementById('draw-canvas');
+    const ctx = canvas.getContext('2d');
+    const btnDrawToggle = document.getElementById('btn-draw-toggle');
+    const btnClearLines = document.getElementById('btn-clear-lines');
+
+    let isDrawMode = false;
+    let isDrawing = false;
+    let lines = []; // 引いた直線を保存する配列
+    let currentLine = null; // 現在ドラッグ中の線
+
+    // キャンバスのサイズをビデオの表示サイズに合わせる
+    function resizeCanvas() {
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+        redrawCanvas();
+    }
+    // ビデオのメタデータ読み込み時とウィンドウリサイズ時にキャンバスサイズを調整
+    video.addEventListener('loadedmetadata', resizeCanvas);
+    window.addEventListener('resize', resizeCanvas);
+
+    // 描画モードの切り替え
+    btnDrawToggle.addEventListener('click', () => {
+        isDrawMode = !isDrawMode;
+        if (isDrawMode) {
+            btnDrawToggle.textContent = '描画モード：ON';
+            btnDrawToggle.classList.add('active');
+            canvas.classList.add('drawing-active'); // クリックを検知できるようにする
+        } else {
+            btnDrawToggle.textContent = '描画モード：OFF';
+            btnDrawToggle.classList.remove('active');
+            canvas.classList.remove('drawing-active'); // 動画の操作(再生/停止など)を優先する
+        }
+    });
+
+    // 全消去ボタン
+    btnClearLines.addEventListener('click', () => {
+        lines = [];
+        redrawCanvas();
+    });
+
+    // マウスの現在座標を取得する関数
+    function getMousePos(e) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top
+        };
+    }
+
+    // キャンバスを再描画する関数（保存された線＋現在引いている線）
+    function redrawCanvas() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // 線のスタイル設定（蛍光イエローで少し太め）
+        ctx.strokeStyle = '#eab308'; // Tailwindのyellow-500
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+
+        // 保存された線を描画
+        lines.forEach(line => {
+            ctx.beginPath();
+            ctx.moveTo(line.startX, line.startY);
+            ctx.lineTo(line.endX, line.endY);
+            ctx.stroke();
+        });
+
+        // 現在ドラッグ中の線を描画
+        if (currentLine) {
+            ctx.beginPath();
+            ctx.moveTo(currentLine.startX, currentLine.startY);
+            ctx.lineTo(currentLine.endX, currentLine.endY);
+            ctx.stroke();
+        }
+    }
+
+    // マウス操作のイベントリスナー
+    canvas.addEventListener('mousedown', (e) => {
+        if (!isDrawMode) return;
+        isDrawing = true;
+        const pos = getMousePos(e);
+        currentLine = { startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (!isDrawing) return;
+        const pos = getMousePos(e);
+        currentLine.endX = pos.x;
+        currentLine.endY = pos.y;
+        redrawCanvas();
+    });
+
+    canvas.addEventListener('mouseup', () => {
+        if (!isDrawing) return;
+        isDrawing = false;
+        if (currentLine) {
+            // 少しでもドラッグされていれば線として保存
+            if (currentLine.startX !== currentLine.endX || currentLine.startY !== currentLine.endY) {
+                lines.push(currentLine);
+            }
+            currentLine = null;
+        }
+        redrawCanvas();
+    });
+
+    // キャンバスからマウスが外れた時も描画を終了する
+    canvas.addEventListener('mouseleave', () => {
+        if (isDrawing) {
+            isDrawing = false;
+            currentLine = null;
+            redrawCanvas();
+        }
+    });
+
+</script>
+
+</body>
+</html>
